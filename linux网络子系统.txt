@@ -1,0 +1,378 @@
+linux网络子系统
+
+	app(apache sshd)
+	shared c library user
+	system call interface
+	network subsys
+	network device drivers	kernel
+	network devices hardware
+
+	linux kernel map
+
+	netif_rx
+	net_rx	net_tx	
+	net_interrupt
+	network device
+
+	数据包接收过程：
+		数据包到达-》网卡中断-》rx_net_action-》cpu n处理device n-》shcedule-》netif_receive_skb-》网卡驱动（DMA 数据包映射到内存地址）-》上层处理
+	数据包发送过程：
+		...
+
+	重要数据结构
+		套接字缓冲区（sk_buff）：
+			实现为双向链表
+struct sk_buff {
+	union {
+		struct {
+			/* These two members must be first. */
+			struct sk_buff		*next;	//双向链表的next指针
+			struct sk_buff		*prev;	//双向链表的prev指针
+
+			union {
+				struct net_device	*dev;	//描述一个网络设备，指定数据包接收/发送给哪个网络设备
+				/* Some protocols might use this space to store information,
+				 * while device pointer would be NULL.
+				 * UDP receive path is one user.
+				 */
+				unsigned long		dev_scratch;
+			};
+		};
+		struct rb_node		rbnode; /* used in netem, ip4 defrag, and tcp stack */
+		struct list_head	list;	//list指针指向双向链表的头元素sk_buff_head，为了每一个sk_buff元素都能最快访问到链表头部，数据结构定义见sb_buf_head
+	};
+
+	union {
+		struct sock		*sk;	//指向拥有此缓冲区的L4套接字的sock数据结构，当数据包由本地L4应用产生或需要L4应用接收时，需要使用此指针
+		int			ip_defrag_offset;
+	};
+
+	union {
+		ktime_t		tstamp;	//数据包接受/预发送时间戳
+		u64		skb_mstamp_ns; /* earliest departure time */
+	};
+	/*
+	 * This is the control buffer. It is free to use for every
+	 * layer. Please put your private variables there. If you
+	 * want to keep them across layers you have to do a skb_clone()
+	 * first. This is owned by whoever has the skb queued ATM.
+	 */
+	char			cb[48] __aligned(8);
+
+	union {
+		struct {
+			unsigned long	_skb_refdst;
+			void		(*destructor)(struct sk_buff *skb);	//函数指针，通常被设置成sock_rfree或sock_rfree，用于当缓冲区被删除时，可以完成某些工作
+		};
+		struct list_head	tcp_tsorted_anchor;
+	};
+
+#if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)	//网络选项以及内核结构，只有内核配置了该选项，才会在sk_buff结构体中增加该字段
+	unsigned long		 _nfct;
+#endif
+	unsigned int		len,	//此sk_buff中数据块（数据包）的大小，数据包在网络分层中移动（添加报头或丢弃报头）等时会改变
+				data_len;	//只计算片段中数据大小
+	__u16			mac_len,	//mac报头大小
+				hdr_len;
+
+	/* Following fields are _not_ copied in __copy_skb_header()
+	 * Note that queue_mapping is here mostly to fill a hole.
+	 */
+	__u16			queue_mapping;
+
+/* if you move cloned around you also must adapt those constants */
+#ifdef __BIG_ENDIAN_BITFIELD
+#define CLONED_MASK	(1 << 7)
+#else
+#define CLONED_MASK	1
+#endif
+#define CLONED_OFFSET()		offsetof(struct sk_buff, __cloned_offset)
+
+	__u8			__cloned_offset[0];
+	__u8			cloned:1,	//表示该结构是另一个sk_buff缓冲区的克隆
+				nohdr:1,
+				fclone:2,
+				peeked:1,
+				head_frag:1,
+				pfmemalloc:1;
+#ifdef CONFIG_SKB_EXTENSIONS
+	__u8			active_extensions;
+#endif
+	/* fields enclosed in headers_start/headers_end are copied
+	 * using a single memcpy() in __copy_skb_header()
+	 */
+	/* private: */
+	__u32			headers_start[0];
+	/* public: */
+
+/* if you move pkt_type around you also must adapt those constants */
+#ifdef __BIG_ENDIAN_BITFIELD
+#define PKT_TYPE_MAX	(7 << 5)
+#else
+#define PKT_TYPE_MAX	7
+#endif
+#define PKT_TYPE_OFFSET()	offsetof(struct sk_buff, __pkt_type_offset)
+
+	__u8			__pkt_type_offset[0];
+	__u8			pkt_type:3;	//次字段会根据L2目的地址进行类型划分，对于ethernet设备而言，此参数可能值有：PACKAGE_HOST(已接收帧的目的地址，封包已到达目的地，多播广播等)
+	__u8			ignore_df:1;
+	__u8			nf_trace:1;
+	__u8			ip_summed:2;
+	__u8			ooo_okay:1;
+
+	__u8			l4_hash:1;
+	__u8			sw_hash:1;
+	__u8			wifi_acked_valid:1;
+	__u8			wifi_acked:1;
+	__u8			no_fcs:1;
+	/* Indicates the inner headers are valid in the skbuff. */
+	__u8			encapsulation:1;
+	__u8			encap_hdr_csum:1;
+	__u8			csum_valid:1;
+
+#ifdef __BIG_ENDIAN_BITFIELD
+#define PKT_VLAN_PRESENT_BIT	7
+#else
+#define PKT_VLAN_PRESENT_BIT	0
+#endif
+#define PKT_VLAN_PRESENT_OFFSET()	offsetof(struct sk_buff, __pkt_vlan_present_offset)
+	__u8			__pkt_vlan_present_offset[0];
+	__u8			vlan_present:1;
+	__u8			csum_complete_sw:1;
+	__u8			csum_level:2;
+	__u8			csum_not_inet:1;
+	__u8			dst_pending_confirm:1;
+#ifdef CONFIG_IPV6_NDISC_NODETYPE
+	__u8			ndisc_nodetype:2;
+#endif
+
+	__u8			ipvs_property:1;
+	__u8			inner_protocol_type:1;
+	__u8			remcsum_offload:1;
+#ifdef CONFIG_NET_SWITCHDEV
+	__u8			offload_fwd_mark:1;
+	__u8			offload_l3_fwd_mark:1;
+#endif
+#ifdef CONFIG_NET_CLS_ACT
+	__u8			tc_skip_classify:1;
+	__u8			tc_at_ingress:1;
+	__u8			tc_redirected:1;
+	__u8			tc_from_ingress:1;
+#endif
+#ifdef CONFIG_TLS_DEVICE
+	__u8			decrypted:1;
+#endif
+
+#ifdef CONFIG_NET_SCHED
+	__u16			tc_index;	/* traffic control index */
+#endif
+
+	union {
+		__wsum		csum;	//校验和
+		struct {
+			__u16	csum_start;
+			__u16	csum_offset;
+		};
+	};
+	__u32			priority;	//数据包QoS等级
+	int			skb_iif;
+	__u32			hash;
+	__be16			vlan_proto;
+	__u16			vlan_tci;
+#if defined(CONFIG_NET_RX_BUSY_POLL) || defined(CONFIG_XPS)
+	union {
+		unsigned int	napi_id;
+		unsigned int	sender_cpu;
+	};
+#endif
+#ifdef CONFIG_NETWORK_SECMARK
+	__u32		secmark;
+#endif
+
+	union {
+		__u32		mark;
+		__u32		reserved_tailroom;
+	};
+
+	union {
+		__be16		inner_protocol;
+		__u8		inner_ipproto;
+	};
+
+	__u16			inner_transport_header;	
+	__u16			inner_network_header;	
+	__u16			inner_mac_header;	
+
+	__be16			protocol;	//下一个高层协议
+	__u16			transport_header;	//L4报头
+	__u16			network_header;	//L3报头
+	__u16			mac_header;	//mac报头
+
+	/* private: */
+	__u32			headers_end[0];
+	/* public: */
+
+	/* These elements must be at the end, see alloc_skb() for details.  */
+	sk_buff_data_t		tail;
+	sk_buff_data_t		end;
+	unsigned char		*head,
+				*data;	//以上四个字段代表sk_buff缓冲区中的边界及其中的数据，head和end指向已分配缓冲区空间的开端和尾端，data和tail指向实际数据的开端和尾端，头空间（head和data之间的空隙）中填写协议报头，尾空间（tail和end之间的空隙）可以继续填充数据
+	unsigned int		truesize;	//代表本sk_buff的总大小
+	refcount_t		users;	//引用计数，正在使用这个sk_buff缓冲区的实例的数目
+
+#ifdef CONFIG_SKB_EXTENSIONS
+	/* only useable after checking ->active_extensions != 0 */
+	struct skb_ext		*extensions;
+#endif
+};
+
+//sk_buf_head结构体
+struct sk_buff_head {
+	/* These two members must be first. */
+	struct sk_buff	*next;
+	struct sk_buff	*prev;
+
+	__u32		qlen;	//代表双向链表中元素的数目
+	spinlock_t	lock;	//自旋锁，为了防止对链表的并发访问
+};
+
+数据缓冲区结构
+sk_buff
+填充
+skb_shared_info
+
+sk_buff管理函数（用以操作sk_buff元素或元素列表）
+	- 分配内存的函数
+		- alloc_skb: 使用kmem_cache_alloc从缓存中取得一个sk_buff数据结构，kmalloc分配一个数据缓冲区(sk_buff在此缓冲区中)
+		- dev_alloc_skb： 供驱动设备使用的缓冲区分配函数，对alloc_skb做了封装
+	- 释放内存的函数：
+		- kfree_skb: 释放数据缓冲区，将其交还缓存
+		- dev_kfree_skb: 对kfree_skb的简单调用
+	- 数据预留以及对其：
+		- skb_reserve: 在数据缓冲区头部预留空间，允许插入一个sk_buff/强迫数据对齐到某个边界（通过更新data和tail两个指针）
+		- skb_push: 将数据块添加到缓冲区的开端
+		- skb_put： 将数据块添加到缓冲区的尾端
+		- skb_pull： 移动head指针，将数据块从缓冲区头部删除
+
+skb_shared_info结构：
+	struct skb_shared_info{
+		atomic_t		dataref;	//数据块用户数目
+		unsigned int 	nr_frags;	
+		unsigned short 	tso_size;
+		unsigned short 	tso_seqs;
+		struct sk_buff 	*frag_list;
+		skb_frag_t 		frags[MAX_SKB_FRAGS];	//所有frag用于处理IP片段
+	}
+
+缓冲区的克隆：
+	skb_clone: 当一个输入封包需要传递给多个接收者时，需要调用此函数，sk_buff的克隆将克隆的和原有的cloned字段都置为1，将克隆的users字段置为1，使得克隆的sk_buff第一个删除就能成功，但是对包含数据的缓冲区引用数目dataref字段会递增
+	skb_share_check: 检测引用计数users字段
+
+net_device结构(存储特定网络设备的所有信息)：
+	标识符：
+		int ifindex //唯一ID
+		int iflink //隧道标识
+		unsigned short dev_id 
+	配置：
+		char name[IFNAMESIZ]	//设备名称，如eth0
+		unsigned long mem_start
+		unsigned long mem_end	//内核与驱动程序共享内存的范围
+		unsigned long base_addr	//设备内存映射到系统内存的起始地址
+		unsigned int irq	//设备用于与内核对话的中断编号
+		unsigned char if_port	//此接口所使用的端口类型
+		unsigned char dma 	//设备所使用的DMA通道
+		unsigned short flags 	
+		unsigned short gflags
+		unsigned short priv_flags	//用于描述网络设备的功能和状态，如IFF_UP、IFF_RUNNINg等
+		int features	//额外的设备功能，如适配卡能否对高端内存做DMA或者硬件能否对封包做校验和工作
+		unsigned mtu 	//最大传输单元，标识设备能处理的帧的最大尺寸
+		unsigned short type 	//设备所属类型（Ethernet Frame Relay等）
+		unsigned short hard_header_len	//以字节为单位的设备头大小
+		unsigned char broadcast[MAX_ADDR_LEN]	//链路层广播地址
+		unsigned char dev_addr[MAX_ADDR_LEN]	
+		unsigned char addr_len 	//设备链路层地址
+		int promiscuity 	//混杂模式
+	混杂模式：
+		接收所有数据包而不是仅限于地址直接指定的数据包，一个设备如果可以接收所有数据包，则意味着其处于混杂模式
+	统计数据：
+		priv指针：指向一个存储有关接口信息的私有数据结构，结构格式取决于设备类型以及特定的模型
+	设备状态：
+		unsigned long state	//由网络队列子系统所使用的一组标识，用于流量控制
+		enum {...} reg_state	//设备的注册状态
+		unsigned long trans_start	//最近一个帧传输启动的时间
+		unsigned long last_rx	//最后一个数据包到达的时间
+		struct net_device *master	//一组设备群集起来作为单一设备
+		spinlock_t xmit_lock
+		int xmit_lock_owner	//串行化hard_start_xmit函数的访问，意味着每个CPU一次只能对任何给定的一个设备做一次传输。xmit_lock_owner是该CPU的ID
+		void *atalk_ptr
+		void *ip_ptr
+		void *dn_ptr
+		void *ip6_ptr
+		void *ec_ptr
+		void *ax25_ptr	//都为指针，指向特定协议专用的数据结构，如ip_ptr指向一个类型为in_device的数据结构，包含各种不同的IPv4相关参数
+	列表管理：
+		net_device数据结构被插入到一个全局链表和两个hash表中
+	链路层多播：
+		struct dev_mc_list *mc_list 	//链路层多播地址列表
+		int mc_count	//多播地址数目，为mc_list的长度
+		int allmulti	//为非零值时，标识监听所有多播地址
+	流量管理：
+		struct net_device *next_sched	//由软中断之一使用
+		struct Qdisc *qdisc
+		struct Qdisc *qdisc_sleeping
+		struct Qdisc *qdisc_ingress
+		struct list_headqdisc_list	//上述字段用于管理入口和出口的数据包队列，以及不同CPU对此设备的访问
+		spinlock_t queue_lock
+		spinlock_t ingress_lock	//避免对出口队列和入口队列的并发访问
+		unsigned long tx_queue_len	//设备的传送队列的长度
+	功能专用：
+		struct divert_blk *divert 	//分流器，允许改变接收数据包的源目地址
+		struct net_bridge_port *br_port 	//当此设备配置成桥接端口时，需要的额外信息
+		void (*vlan_rx_register)(...)
+		void (*vlan_rx_add_vid)(...)
+		void (*vlan_rx_kill_vid)(...)	//由VLAN代码所用的三个函数指针。分别为vlan设备的注册添加和删除
+		int netpoll_rx	
+		void (poll_controller)(...)	//Netpoll功能使用
+	通用字段：
+		atomic_t refcnt 	//引用计数
+		int watchdog_timeo
+		struct timer_list watchdog_timer	//tx_timeout的定时器
+		int (*poll)(...)
+		struct list_head poll_list
+		int quota
+		int weight	//NAPI功能使用
+		const struct iw_handler_def *wireless_handlers
+		struct iw_public_data *wireless_data	//无线设备使用的参数和函数指针
+		struct list_head todo_list
+		struct class_device class_dev 	//由新的通用内核驱动程序基础架构使用
+	函数指针：
+		struct ethtool_ops *ethtool_ops	//指向一组函数指针的指针，用于设置或获取不同设备参数的配置
+		int (*init)(...)	
+		void (*uninit)(...)
+		void (*open)(...)
+		void (*stop)(...)	//用于一个设备的初始化、清理、销毁、开启、关闭
+		struct net_device_stats* (*get_stats)(...)
+		struct iw_statustics* (*get_wireless_stats)(...)	//获取设备统计信息
+		int (*hard_start_xmit)(...)	//用于传输一个帧
+		int (*hard_header)(...)
+		int (*rebuild_header)(...)
+		int (*hard_header_cache)(...)
+		void (*header_cache_update)(...)
+		int (*hard_header_parse)(...)
+		int (*neigh_setup)(...)	//邻居层初始化
+		int (*do_ioctl)(...)	//ioctl命令的处理
+		void (set_multicast_list)(...)	//设置链路层多播地址
+		int (*set_mac_address)(...)	//设置mac地址
+		int (*set_config)(...)	//配置驱动程序参数
+		int (*change_mtu)	//改变mtu值
+		void (*tx_timeout)(...) 	//看门狗定时器超时是调用此函数
+
+用户空间与内核接口
+	除system call外，还有三个特殊接口，其中两个是虚拟文件系统：
+		procfs(/proc 文件系统)：虚拟文件系统，允许内核以文件的形式向用户空间输出内部信息
+		sysctl(/proc/sys 目录)：允许用户空间读取或修改内核变量的值
+		sysfs(/sys 文件系统)
+	ioctl
+	netlink
+
+	procfs：网络代码所创建的文件位于/proc/net
