@@ -375,4 +375,103 @@ net_device结构(存储特定网络设备的所有信息)：
 	ioctl
 	netlink
 
-	procfs：网络代码所创建的文件位于/proc/net
+	- procfs：网络代码所创建的文件位于/proc/net，其中目录创建可由proc_mkdir创建，文件可由proc_net_fops_create和proc_net_remove注册和除名
+	- sysctl：/proc/sys中的文件和目录都是以ctl_table结构定义的，关键字段如下：
+		const char 	*procname	//在/proc/sys中使用的文件名
+		int 	maxlen 	//输出内核变量的尺寸大小
+		mode_t 	mode 	//文件或目录的访问权限
+		ctl_table	*child	//表示目录与文件之间的父子关系
+		proc_handler	//文件读取或写入操作的函数（部分如下）
+			proc_dostring	//读或写一个字符串
+			proc_dointvec	//读或写一个包含一个或多个整数的数组
+		strategy	//文件显示或存储之前的格式化工作函数
+		extra1
+		extra2	//可选参数，通常用于定义变量的最大值和最小值
+	- ioctl
+	- netlink：socket API即可使用
+
+网络子系统初始化
+	内核组件初始化
+	设备注册和初始化
+	分配资源供内核使用
+
+	通知链：
+		用于内核子系统之间的交互
+		发布-订阅模式
+		通知链的定义：
+			struct notifier_block{
+				int (*notifier_call)(struct notifier_block *self, unsigned long, void *);	//要执行的函数
+				struct notifier_block *next;	//链表的next指针
+				int priority;	//优先级
+			};
+		链操作：
+			注册： int notifier_chain_register(struct notifier_block **list, struct notifier_block *n)	//在给定通知链增加一个元素,根据优先级和插入时间排序
+			删除： int notifier_chain_unregister(struct notifier_block **nl, struct notifier_block *n)	//在给定通知链中删除一个元素
+			通知： int notifier_call_chain(struct notifier_block **n, unsigned long val, void *v)	//n：通知链，val：事件类型，v：供处理函数使用的参数
+		网络子系统的通知链：
+			inetaddr_chain：发送有关本地接口上的IPv4地址的写入、删除以及变更的通知信息，ipv6则使用类似的inet6addr_chain
+			netdev_chain：发送有关网络设备注册状态的通知信息
+
+	网络设备初始化：
+		硬件初始化：设备驱动程序和通用总线层共同完成，主要完成中断和I/O地址映射，使得设备能够与内核交互
+		软件初始化：提供配置参数，如IP地址等
+		功能初始化：流量控制等具体功能
+
+		设备驱动程序如何分配建立设备/内核通信所需的资源：
+			IRQ线：物理设备必须分派一个IRQ，虚拟设备无需IRQ			
+			I/O端口和内存注册：驱动程序将设备的寄存器/内存映射到系统内存，使用request_region和release_region注册和释放
+
+		设备与内核之间的交互：
+			交互方式：
+				轮询：内核定期检查设备状态
+				中断：设备向内核发送硬件信号，触发中断事件
+
+		硬件中断：
+			请求内核分派一个IRQ：int request_irq(unsigned int irq, void (*handler)(int, void*, struct pt_regs*), unsigned long irqflags, const char * devname, void *dev_id)	//向内核请求一个irq并注册一个中断处理例程
+			释放irq：void free_irq(unsigned_int irq, void *dev_id)	//删除dev_id注册的中断处理例程
+
+		中断类型：
+			接收一帧
+			传输失败：二进制指数回退失败
+			DMA传输成功完成
+			设备有足够内存处理新传输
+
+		设备处理层初始化：
+			net_dev_init：流量控制和各个CPU入口队列的初始化
+
+		用户空间辅助程序：
+			/sbin/modprobe：加载模块进内核时被调用
+			/sbin/hotplug：热插拔
+
+		虚拟设备：
+			虚拟设备是建立在一个或多个真实设备之上的抽象
+			- 绑定(bonding)
+			- 802.1Q：vlan
+			- 桥接(bridging)
+			- 别名接口(aliasing interface)
+			- 普通均衡器
+			- 隧道接口
+
+			虚拟设备与内核网络协议栈之间的交互：
+				初始化：具有net_device数据结构
+				配置：特殊用户空间工具配置虚拟设备
+				外部接口：/proc
+				传输：流量控制
+				接收：无注册IRQ和寄存器/内存映射过程等，数据包从相应物理设备中间接获取
+				外部通知信息
+
+	PCI层和网络接口卡：内核如何管理PCI设备
+		PCI NIC设备驱动程序的注册： pci_register_driver
+			设备id：pci_device_id
+				struct pci_device_id{
+					unsigned int vendor device;
+					unsigned int subvendor, subdevice;
+					unsigned int class, class_mask;
+					unsigned long driver_data;
+				};
+		电源管理和网络唤醒：
+			pci_driver.suspend	//停止设备出口队列，使得设备无法再传输
+			pci_driver.resume	//重启设备出口队列
+
+	组件初始化的内核基础架构：
+		
