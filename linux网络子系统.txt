@@ -474,4 +474,295 @@ net_device结构(存储特定网络设备的所有信息)：
 			pci_driver.resume	//重启设备出口队列
 
 	组件初始化的内核基础架构：
-		
+		early_param	__setup __obsolete_setup	//early_param必须在初期处理的较高优先级的选项
+					__setup_param
+					".init.setup"
+
+		使用引导选项配置网络设备：
+			网络设备关键字存储：
+				引导字符串实例：LILO: linux ether=5,0x260,eth0 ether=15,0x300,eth1
+				struct netdev_boot_setup{
+					char 	name[IFNAMESIZ];
+					struct	ifmap map;
+				}
+				struct ifmap{
+					unsigned long	mem_start;
+					unsigned long	mem_end;
+					unsigned short 	base_addr;
+					unsigned char 	irp;
+					unsigned char 	dma;
+					unsigned char 	port;
+				}
+
+		模块初始化代码：
+			init_module
+			cleanup_module
+			module_init
+			module_exit
+
+			设备初始化宏：
+				__devinit
+				__devexit
+				__devexit_p
+				__devinitdata
+				__devexitdata
+
+		引导期间初始化函数：
+			xxx_initcall：
+				static void __init do_initcalls(void){
+					initcall_t *call;
+					int count = preempt_count();
+					for(call = __initcall_start; call < __initcall_end; call++){
+						... ... ...
+						(*call)();
+						... ... ...
+					}
+					flush_scheduled_work();
+				}
+
+			内存最优化：
+				module_init函数执行一次后，内核将其释放
+				模块与内核静态链接时，module_exit函数不会执行，链接期间被丢弃
+				__init和__exit宏：#define __init __attribute__ ((__section__(".text.init")))
+				xxx_initcall和__exitcall段，将被丢弃
+
+	设备注册和初始化
+		网络设备何时以及如何在内核注册
+		网络设备如何利用网络设备数据库注册，并指派一个net_device结构的实例
+		net_device结构如何组织到hash表和列表，以便于做各种查询
+		net_device实例如何初始化，一部分由内核核心函数完成，一部分由其设备驱动程序完成
+		就注册而言，虚拟设备和真实设备有何差别
+
+		设备注册时机：
+			加载NIC设备驱动程序
+			插入可热插拔网络设备
+		设备除名时机：
+			卸载NIC设备驱动程序
+			删除可热插拔网络设备
+
+		分配net_device(dev)结构
+			初始化参数：
+				私有数据结构的大小：net_device数据结构可以由设备驱动程序扩充一个私有数据区块
+				设备名称
+				设置函数
+			内核提供了一组内含alloc_netdev的包裹函数：
+				alloc_etherdev：return alloc_netdev(sizeof_priv, "eht%d". ether_setup)；以太网
+				alloc_fddidev：return alloc_netdev(sizeof_priv, "fddi%d". fddi_setup)；FDDI  
+				alloc_hippi_dev:return alloc_netdev(sizeof_priv, "hip%d", hippi_setup):高性能并行接口
+				alloc_trdev:return alloc_netdev(sizeof_priv, "tr%d". tr_setup):令牌环
+				alloc_fcdev:return alloc_netdev(sizeof_priv, "fc%d". fc_setup):光纤通信
+				alloc_irdadev:return alloc_netdev(sizeof_priv, "irda%d". irda_device_setup):红外数据标准协会
+			NIC注册和除名的架构：
+				注册：
+					xxx_probe/module_init
+						dev=alloc_etherdev(sizeof_priv, "eth%d", ether_setup)
+							dev=kmalloc(sizeof(net_device)+sizeof_priv+padding)
+							ether_setup(dev)
+							strcpy(dev->name, "eth%d")
+							return(dev)
+						... ... ...
+						netdev_boot_setup_check(dev)
+						... ... ...
+						register_netdev(dev)
+							register_netdevice(dev)
+				除名：
+					xxx_remove_one/module_exit
+						unregister_netdev(dev)
+							unregister_netdevice(dev)
+						... ... ...
+						free_netdev(dev)
+			设备初始化：
+				net_device：
+					设备驱动程序：irq，内存以及端口
+					设备类型：xxx_setup
+					各种功能
+					初始化程序				函数指针
+					xxx_setup				change_mtu
+											set_mac_address
+											rebuild_header
+											hard_header
+											hard_header_cache
+											header_cacahe_update
+											hard_header_parse
+											变量名称
+											type
+											hard_header_len
+											mtu
+											addr_len
+											tx_queue_len
+											broadcast
+											flags
+					初始化程序				函数指针
+					设备驱动程序的探测函数	open
+											stop
+											hard_start_xmit
+											tx_timeout
+											watchdog_timeo
+											get_stats
+											get_wireless_stats
+											set_multicast_list
+											do_ioctl
+											init
+											uninit
+											poll
+											ethtool_ops
+											变量名称
+											base_addr
+											irq
+											if_port
+											priv
+											features
+			设备驱动程序初始化：
+				xxx_probe:
+					不同设备同一个参数有不同的初始化值：
+						if(vp->capabilities & CapBusMaster){
+							vp->full_bus_master_tx = 1;
+						}
+						... ... ...
+						if(vp->full_bus_master_tx){
+							dev->hard_start_xmit=boomerang_start_xmit;
+							... ... ...
+						} else{
+							dev->hard_start_xmit = vortex_start_xmit;
+						}
+			设备类型初始化：xxx_setup
+				void ether_setup(struct net_device *dev){
+					dev->change_mtu	= eth_change_mtu;
+					dev->hard_header 	= eth_header;
+					dev->rebuild_header	= eth_rebuild_header;
+					dev->set_mac_address	= eth_mac_addr;
+					dev->hard_header_cache	= eth_header_cache;
+					dev->header_cache_update 	= eth_header_cache_update;
+					dev->hard_header_parse	= eth_header_parse;
+					dev->type 	= ARPHRD_ETHER;
+					dev->hard_header_len 	= ETH_HLEN;
+					dev->mtu 	= 1500;
+					dev->addr_len 	= ETH_ALEN;
+					dev->tx_queue_len	= 1000;
+					dev->flags 	= IFF_BROADCAST|IFF_MULTICAST;
+					memset(dev->broadcast, 0xFF, ETH_ALEN);
+				}
+			可选的初始化和特殊情况：
+				函数指针初始化，避免空指针
+				if(dev->init && dev->init(dev) != 0){
+					...
+				}
+			net_device结构的组织：
+				net_device数据结构插入在一个全局列表和两张hash表中，可供内核按需查询net_device数据库
+					dev_base:内含所有net_device的全局列表
+					dev_name_head:hash表, 以设备名称为索引
+					dev_index_head:hash表，以设备ID dev->ifindex为索引
+			查询：
+				使用设备名称或设备ID（dev_get_by_name dev_get_by_index）使用上述hash表
+			设备状态：
+				flags：IFF_UP等
+				reg_state
+				state
+			队列规则状态：
+				每个网络设备都会被分派一种队列规则，流量控制以此实现其QoS机制，net_device的state字段是流量控制所用字段之一，其值有：
+					LINK_STATE_START
+					LINK_STATE_PRESENT
+					LINK_STATE_NOCARRIER
+					等
+			注册状态：
+				reg_state:
+					NETREG_UNINITIALIZED
+					NETREG_REGISTERING	
+					NETREG_REGISTERED	设备已注册
+					等
+			net_device注册状态机
+						register_netdevice
+					未初始化			正在注册
+									netdev_run_todo
+									已注册
+									unregister_netdevice
+										dev->close
+											dev->stop
+										dev->uninit
+									正在除名
+										netdev_run_todo
+											metdev_wait_allrefs
+											dev-》destructor
+												free_netdev
+									已除名
+										free_netdev
+									释放
+			设备注册状态通知：
+				netdev_chain通知链
+					条件：
+						NETDEV_UP
+						NETDEV_GOING_DOWN
+						NETDEV_DOWN
+						NETDEV_REGISTER
+						NETDEV_UNREGISTER
+						NETDEV_REBOOT
+						NETDEV_CHANGEADDR
+						NETDEV_CHANGENAME
+						NETDEV_CHANGE
+				NETLINK和RTMGRP_LINK多播群组
+			设备注册：
+				register_netdevice：
+					初始化net_device字段
+					当内核支持divert功能是，分配该功能所需配置区块，链接至dev->divert
+					执行dev->init
+					分配设备识别码
+					添加net_device进dev_base和两张hash表
+					检查功能标识是否有无效组合
+					设置dev->state
+					初始化设备队列规则
+					触发netdev_chain通知链
+			设备除名：
+				dev_close
+				释放所有已分配资源
+				dev_base和两张hash表中删除net_device实例
+				引用归零后释放net_device
+				删除/proc和/sys文件系统中的文件
+				unregister_netdevice：
+					int unregister_netdevice(struct net_device *dev)
+						如果设备没有关闭，则调用dev_close予以关闭
+						dev_base和两张hash表中删除net_device实例
+						引用归零调用dev_shutdown销毁net_device实例
+						向netdev_chain通知链发送NETDEV_UNREGISITER通知信息
+			引用计数：
+				引用归零释放结构，未释放等待函数netdev_wait_allrefs:
+					一个知道dev->refcnt减到零时的循环，每秒发送一个NETDEV_UNREGISTER通知信息
+			开启和关闭网络设备：
+				dev_open: if up eht0
+					调用dev_open
+					设置dev->state
+					设置dev->flags
+					调用dev_activate来初始化由流量控制使用的出口队列规则，然后启动看门狗定时器
+					传送NETDEV_UP通知信息给netdev_chain通知链
+				dev_close: if down eth0
+					传送NETDEV_GOING_DOWN通知信息给netdev_chain
+					调用dev_deacticate以关闭出口队列规则
+					清除dev->state
+					调用dev->stop
+					清除dev->flags
+					传送NETDEV_DOWN通知给通知链
+			与电源管理之间的交互：
+				只要系统进入挂起模式或者重新继续，NIC设备驱动程序就可接到通知
+					当系统进入挂起模式时，就会执行设备驱动程序所提供的suspend函数
+						清除dev->state中的__LINK_STATE_PRESENT标识
+						如果设备已开启，则使用netif_stop_queue关闭出口队列
+					唤醒设备时
+						设备dev->state中的上述标识
+						重启出口队列，重启看门狗定时器
+			链接状态变更侦测：
+				由netif_carrier_on/off通知
+					电缆线插入或拔出NIC
+					电缆线另一端设备电源关闭
+					动作：
+						清除dev->state中的__LINK_STATE_NOCARRIER标识
+						产生链接状态变更时间，交付linkwatch_fire_event处理
+						如果设备已开启，启动看门狗定时器
+			从用户空间配置设备相关信息：
+				ifconfig,mii-tool
+				ethtool
+				ip link
+			虚拟设备：
+				虚拟设备也必须像真实设备那样注册以及开启才能使用，差别如下：
+					虚拟设备偶尔会直接调用register_netdevice和unregister_netdevice而不是其封装函数，并且会自行负责上锁
+					真实设备只能被用户命令关闭，不能被除名
+
+传输和接收
